@@ -85,24 +85,7 @@ Video2LoRA is trained **end-to-end using only the standard diffusion objective**
 
 ---
 
-# 🎬 Results
 
-We evaluate Video2LoRA on the **Open-VFX dataset**.
-
-| Metric              | Ours      | Best Baseline |
-| ------------------- | --------- | ------------- |
-| FVD ↓               | **1568**  | 1679          |
-| Dynamic Degree ↑    | **0.78**  | 0.71          |
-| Motion Smoothness ↑ | **98.50** | 98.24         |
-| Aesthetic Quality ↑ | **0.565** | 0.537         |
-
-Our method consistently improves:
-
-* visual fidelity
-* motion coherence
-* semantic accuracy
-
----
 
 # 🌍 Zero-Shot Semantic Generation
 
@@ -121,27 +104,42 @@ Example semantic controls include:
 ---
 
 # 📂 Dataset
+Video2LoRA follows the dataset format used in VideoX-Fun, which supports mixed image and video training with text descriptions.
 
-Our training dataset is collected from multiple sources:
+Organize your dataset in the following structure:
 
-* **Open-VFX**
-* Higgsfield
-* PixVerse
-* public online video resources
+project/
+│
+├── datasets/
+│   ├── internal_datasets/
+│   │
+│   │── train/
+│   │    ├── 00000001.mp4
+│   │    ├── 00000002.jpg
+│   │    ├── 00000003.mp4
+│   │    └── ...
+│   │
+│   └── json_of_internal_datasets.json
 
-Dataset statistics:
+#📝 JSON Annotation Format
+```
+[
+  {
+    "file_path": "train/00000001.mp4",
+    "text": "A group of young men in suits and sunglasses walking down a city street.",
+    "type": "video"
+  },
+  {
+    "file_path": "train/00000002.jpg",
+    "text": "A group of young men in suits and sunglasses walking down a city street.",
+    "type": "image"
+  }
+]
+```
 
-* ~4K video samples
-* 200+ semantic categories
-* multiple effect types and styles
-
-Dataset structure:
 
 ```
-datasets/
-    videos/
-    annotations/
-```
+
 
 ---
 
@@ -150,8 +148,8 @@ datasets/
 ## Clone repository
 
 ```bash
-git clone https://github.com/BerserkerVV/Video2LoRA_new.git
-cd Video2LoRA_new
+git clone https://github.com/BerserkerVV/Video2LoRA.git
+cd Video2LoRA
 ```
 
 ## Create environment
@@ -174,63 +172,34 @@ pip install -r requirements.txt
 Train Video2LoRA:
 
 ```bash
-bash scripts/train.sh
+bash scripts/cogvideoxfun/train_lora.sh
 ```
 
-or
-
-```bash
-python train.py --config configs/train.yaml
-```
 
 Training setup:
 
-| Item       | Value            |
-| ---------- | ---------------- |
-| Backbone   | CogVideoX-I2V-5B |
-| GPUs       | 8 × NVIDIA A800  |
-| Iterations | 20K              |
-| Frames     | 49               |
-| FPS        | 8                |
-| Resolution | 480×720          |
+| Item       | Value                     |
+| ---------- | ----------------          |
+| Backbone   | CogVideoX-Fun-V1.1-5b-InP |
+| GPUs       | 8 × NVIDIA A800           |
+| Iterations | 20K                       |
+| Frames     | 49                        |
+| FPS        | 8                         |
+| Resolution | 512, 768, 1024, 1280      |
 
-Only the following parameters are trained:
 
-* HyperNetwork
-* auxiliary matrices
-
-The diffusion backbone remains **frozen**.
-
----
 
 # 🎥 Inference
 
 Generate a video using a reference video:
 
-```bash
-python inference.py \
-    --reference path/reference.mp4 \
-    --prompt "a person dissolving into particles"
+```
+bash examples/cogvideox_fun/run_predict_i2v.sh
 ```
 
 ---
 
-# 📊 Ablation Study
 
-We analyze the impact of:
-
-* LightLoRA dimensionality `(a,b)`
-* iterative refinement steps `k`
-
-Best configuration:
-
-```
-a = 100
-b = 50
-k = 4
-```
-
----
 
 # 📖 Citation
 
@@ -247,24 +216,6 @@ If you find our work useful, please cite:
 
 ---
 
-# 🙏 Acknowledgements
 
-This project builds upon several excellent open-source works:
-
-* CogVideoX
-* Diffusion Transformers
-* LoRA
-
-We thank the authors for their contributions to the community.
-
----
-
-# 📬 Contact
-
-If you have any questions, feel free to open an issue or contact the authors.
-
----
-
-## ⭐ Star the Repo
 
 If you find this project useful, please consider starring the repository to support our work.
