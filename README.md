@@ -28,7 +28,7 @@ Key features:
 
 # 🧠 Method Overview
 
-![framework](assets/framework.png)
+![framework](hyper_crop.pdf)
 
 Video2LoRA consists of three key components:
 
