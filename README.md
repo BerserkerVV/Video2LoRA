@@ -11,7 +11,7 @@ Official implementation of **Video2LoRA**, a unified framework for semantic-cont
 ---
 
 # 🔥 Highlights
-
+![teaser](assets/teaser.jpg)
 Video2LoRA introduces a new paradigm for **semantic-controlled video generation**.
 
 Instead of training separate models or LoRA adapters for each semantic condition (e.g., visual effects, camera motion, style), our framework **predicts semantic-specific LoRA weights directly from a reference video**.
