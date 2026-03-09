@@ -36,15 +36,15 @@ Video2LoRA consists of three key components:
 
 We introduce **LightLoRA**, a compact LoRA formulation that decomposes the standard LoRA matrices:
 
-[
+$$
 A = A_{\text{aux}} A_{\text{pred}}, \quad
 B = B_{\text{pred}} B_{\text{aux}}
-]
+$$
 
 Where:
 
-* (A_{\text{aux}}, B_{\text{aux}}): trainable auxiliary matrices
-* (A_{\text{pred}}, B_{\text{pred}}): predicted by the HyperNetwork
+* $A_{\text{aux}}, B_{\text{aux}}$: trainable auxiliary matrices
+* $A_{\text{pred}}, B_{\text{pred}}$: predicted by the HyperNetwork
 
 This design significantly reduces parameter size while preserving semantic adaptability.
 
@@ -85,8 +85,6 @@ Video2LoRA is trained **end-to-end using only the standard diffusion objective**
 
 ---
 
-
-
 # 🌍 Zero-Shot Semantic Generation
 
 Video2LoRA generalizes well to **unseen semantic conditions**.
@@ -104,25 +102,29 @@ Example semantic controls include:
 ---
 
 # 📂 Dataset
+
 Video2LoRA follows the dataset format used in VideoX-Fun, which supports mixed image and video training with text descriptions.
 
 Organize your dataset in the following structure:
 
+```
 project/
 │
 ├── datasets/
 │   ├── internal_datasets/
 │   │
-│   │── train/
+│   ├── train/
 │   │    ├── 00000001.mp4
 │   │    ├── 00000002.jpg
 │   │    ├── 00000003.mp4
 │   │    └── ...
 │   │
 │   └── json_of_internal_datasets.json
-
-#📝 JSON Annotation Format
 ```
+
+## 📝 JSON Annotation Format
+
+```json
 [
   {
     "file_path": "train/00000001.mp4",
@@ -137,10 +139,6 @@ project/
 ]
 ```
 
-
-```
-
-
 ---
 
 # ⚙️ Installation
@@ -148,7 +146,7 @@ project/
 ## Clone repository
 
 ```bash
-git clone https://github.com/BerserkerVV/Video2LoRA.git
+git clone https://github.com/BerserkerVV/Video2LoRA.git  
 cd Video2LoRA
 ```
 
@@ -175,11 +173,10 @@ Train Video2LoRA:
 bash scripts/cogvideoxfun/train_lora.sh
 ```
 
-
 Training setup:
 
 | Item       | Value                     |
-| ---------- | ----------------          |
+|------------|---------------------------|
 | Backbone   | CogVideoX-Fun-V1.1-5b-InP |
 | GPUs       | 8 × NVIDIA A800           |
 | Iterations | 20K                       |
@@ -187,25 +184,23 @@ Training setup:
 | FPS        | 8                         |
 | Resolution | 512, 768, 1024, 1280      |
 
-
+---
 
 # 🎥 Inference
 
 Generate a video using a reference video:
 
-```
+```bash
 bash examples/cogvideox_fun/run_predict_i2v.sh
 ```
 
 ---
 
-
-
 # 📖 Citation
 
 If you find our work useful, please cite:
 
-```
+```bibtex
 @inproceedings{video2lora2026,
   title={Video2LoRA: Unified Semantic-Controlled Video Generation via Per-Reference-Video LoRA},
   author={...},
@@ -215,7 +210,5 @@ If you find our work useful, please cite:
 ```
 
 ---
-
-
 
 If you find this project useful, please consider starring the repository to support our work.
