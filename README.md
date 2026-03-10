@@ -1,13 +1,12 @@
 # Video2LoRA
-*A framework that customizes a dedicated semantic LoRA for each reference video.*
-### Unified Semantic-Controlled Video Generation via Per-Reference-Video LoRA
+*Customizing a dedicated semantic LoRA for each reference video.*
 
+### Unified Semantic-Controlled Video Generation via Per-Reference-Video LoRA  
 **CVPR 2026 Findings**
 
-Official implementation of **Video2LoRA**, a unified framework for semantic-controlled video generation via **per-reference-video LoRA predicted by a HyperNetwork**.
+Official implementation of the paper **"Video2LoRA: Unified Semantic-Controlled Video Generation via Per-Reference-Video LoRA"**.
 
-> Video2LoRA enables semantic video generation by dynamically predicting lightweight LoRA adapters from reference videos, without requiring per-condition fine-tuning.
-
+> Video2LoRA enables semantic video generation by dynamically predicting lightweight LoRA adapters from reference videos using a HyperNetwork, without requiring per-condition fine-tuning.
 ---
 
 # 🔥 Highlights
