@@ -200,11 +200,14 @@ bash examples/cogvideox_fun/run_predict_i2v.sh
 If you find our work useful, please cite:
 
 ```bibtex
-@inproceedings{video2lora2026,
-  title={Video2LoRA: Unified Semantic-Controlled Video Generation via Per-Reference-Video LoRA},
-  author={...},
-  booktitle={Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)},
-  year={2026}
+@misc{wu2026video2loraunifiedsemanticcontrolledvideo,
+      title={Video2LoRA: Unified Semantic-Controlled Video Generation via Per-Reference-Video LoRA}, 
+      author={Zexi Wu and Qinghe Wang and Jing Dai and Baolu Li and Yiming Zhang and Yue Ma and Xu Jia and Hongming Xu},
+      year={2026},
+      eprint={2603.08210},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2603.08210}, 
 }
 ```
 
