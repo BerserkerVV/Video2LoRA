@@ -1,5 +1,5 @@
 # Video2LoRA
-
+*A framework that customizes a dedicated semantic LoRA for each reference video.*
 ### Unified Semantic-Controlled Video Generation via Per-Reference-Video LoRA
 
 **CVPR 2026 Findings**
