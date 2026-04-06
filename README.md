@@ -199,7 +199,7 @@ If you find our work useful, please cite:
 ```bibtex
 @misc{wu2026video2loraunifiedsemanticcontrolledvideo,
       title={Video2LoRA: Unified Semantic-Controlled Video Generation via Per-Reference-Video LoRA}, 
-      author={Zexi Wu and Qinghe Wang and Jing Dai and Baolu Li and Yiming Zhang and Yue Ma and Xu Jia and Hongming Xu},
+      author={Zexi Wu and Baolu Li and Jing Dai and Yiming Zhang and Yue Ma and Qinghe Wang and Xu Jia and Hongming Xu},
       year={2026},
       eprint={2603.08210},
       archivePrefix={arXiv},
