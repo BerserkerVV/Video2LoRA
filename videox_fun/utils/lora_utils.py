@@ -72,14 +72,15 @@ class LoRAModule(torch.nn.Module):
         self.org_module = org_module
         self.multiplier = multiplier  # 添加 multiplier 属性
         
+        down_weight = torch.empty(rank, down_dim)
+        up_weight = torch.empty(up_dim, rank)
+        torch.nn.init.xavier_normal_(down_weight)
+        torch.nn.init.zeros_(up_weight)
+        weight = torch.concat([torch.flatten(down_weight), torch.flatten(up_weight)])
         if is_train:
-            # weight initialization
-            down_weight = torch.empty(rank, down_dim)
-            up_weight = torch.empty(up_dim, rank)
-            torch.nn.init.xavier_normal_(down_weight)
-            torch.nn.init.zeros_(up_weight)
-            weight = torch.concat([torch.flatten(down_weight), torch.flatten(up_weight)])
             self.weight_embedding = torch.nn.Parameter(weight)
+        else:
+            self.register_buffer("weight_embedding", weight)
         
     def update_weight(self, weight_embedding):
         """
@@ -90,13 +91,12 @@ class LoRAModule(torch.nn.Module):
         # Check if the shape is [batch_size, (up_dim+down_dim)*r] or [(up_dim+down_dim)*r]
         expected_dim = (self.up_dim + self.down_dim) * self.rank
 
-        if len(weight_embedding.shape) > 2 or (
-                len(weight_embedding.shape) == 2 and weight_embedding.shape[1] != expected_dim) or (
-                len(weight_embedding.shape) == 1 and weight_embedding.shape != (expected_dim,)):
+        if len(weight_embedding.shape) > 2 or weight_embedding.shape[-1] != expected_dim:
             raise ValueError(
                 "The shape of weight_embedding must be [batch_size, (up_dim+down_dim)*r] or [(up_dim+down_dim)*r], "
                 "and the dimension of weight_embedding must not be more than 2.")
         self._parameters.pop("weight_embedding", None)
+        self._buffers.pop("weight_embedding", None)
         self.weight_embedding = weight_embedding
         
     def update_aux(self, down_aux=None, up_aux=None):
@@ -116,20 +116,32 @@ class LoRAModule(torch.nn.Module):
     def forward(self, hidden_states):
         orig_dtype = hidden_states.dtype
         # 确保计算在 embedding 的精度下进行 (通常是 float32)
-        dtype = self.weight_embedding.dtype
+        weight_embedding = self.weight_embedding
+        if weight_embedding.dim() == 2 and hidden_states.size(0) != weight_embedding.size(0):
+            if weight_embedding.size(0) == 1:
+                weight_embedding = weight_embedding.expand(hidden_states.size(0), -1)
+            elif hidden_states.size(0) % weight_embedding.size(0) == 0:
+                repeats = hidden_states.size(0) // weight_embedding.size(0)
+                weight_embedding = weight_embedding.repeat_interleave(repeats, dim=0)
+            else:
+                raise ValueError(
+                    f"LiLoRA batch mismatch: hidden batch={hidden_states.size(0)}, "
+                    f"weight batch={weight_embedding.size(0)}"
+                )
+        dtype = weight_embedding.dtype
 
         # 1. 获取原始层的输出 (这一步保证了不丢失预训练模型的信息)
         # 注意：必须调用 org_forward 而不是 self.org_module()
         org_out = self.org_forward(hidden_states)
 
         # 2. 计算 LiLoRA 的增量部分
-        down_aux = self.down_aux.to(self.weight_embedding.device)
-        up_aux = self.up_aux.to(self.weight_embedding.device)
+        down_aux = self.down_aux.to(device=weight_embedding.device, dtype=dtype)
+        up_aux = self.up_aux.to(device=weight_embedding.device, dtype=dtype)
         
         # 分割与 Reshape (与 LoRALinearLayer 逻辑一致)
-        down_weight, up_weight = self.weight_embedding.split([self.down_dim * self.rank, self.up_dim * self.rank], dim=-1)
+        down_weight, up_weight = weight_embedding.split([self.down_dim * self.rank, self.up_dim * self.rank], dim=-1)
         
-        if self.weight_embedding.dim() == 1:
+        if weight_embedding.dim() == 1:
             down_weight = down_weight.reshape(self.rank, -1)
             up_weight = up_weight.reshape(-1, self.rank)
             
@@ -142,8 +154,8 @@ class LoRAModule(torch.nn.Module):
             delta_out = F.linear(delta_out, up)
         else:
             # Batch 模式 (用于 HyperNetwork)
-            down_weight = down_weight.reshape(self.weight_embedding.size(0), self.rank, -1)
-            up_weight = up_weight.reshape(self.weight_embedding.size(0), -1, self.rank)
+            down_weight = down_weight.reshape(weight_embedding.size(0), self.rank, -1)
+            up_weight = up_weight.reshape(weight_embedding.size(0), -1, self.rank)
             
             down = down_weight @ down_aux
             up = up_aux @ up_weight

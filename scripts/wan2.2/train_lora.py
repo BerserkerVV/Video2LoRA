@@ -72,7 +72,8 @@ from videox_fun.models import (AutoencoderKLWan, AutoencoderKLWan3_8, WanT5Encod
                               Wan2_2Transformer3DModel)
 from videox_fun.pipeline import Wan2_2Pipeline, Wan2_2I2VPipeline
 from videox_fun.utils.discrete_sampler import DiscreteSampling
-from videox_fun.utils.lora_utils import create_network, merge_lora, unmerge_lora
+from videox_fun.utils.hypernet import VideoHyperDream
+from videox_fun.utils.lora_utils import LoRANetwork, create_network, merge_lora, unmerge_lora
 from videox_fun.utils.utils import get_image_to_video_latent, save_videos_grid
 
 if is_wandb_available():
@@ -153,6 +154,65 @@ def resize_mask(mask, latent, process_first_frame_only=True):
             align_corners=False
         )
     return resized_mask
+
+def get_vae_latent_channels(vae):
+    config = getattr(vae, "config", None)
+    if config is not None and hasattr(config, "latent_channels"):
+        return config.latent_channels
+    return getattr(vae, "latent_channels", 16)
+
+def align_video_frames(video, frame_count):
+    if video.size(1) >= frame_count:
+        return video[:, :frame_count]
+    pad_count = frame_count - video.size(1)
+    pad = video[:, -1:].repeat(1, pad_count, 1, 1, 1)
+    return torch.cat([video, pad], dim=1)
+
+def match_ref_batch(ref_pixel_values, target_batch_size):
+    if ref_pixel_values.size(0) == target_batch_size:
+        return ref_pixel_values
+    if ref_pixel_values.size(0) == 1:
+        return ref_pixel_values.expand(target_batch_size, -1, -1, -1, -1)
+    if target_batch_size % ref_pixel_values.size(0) == 0:
+        repeats = target_batch_size // ref_pixel_values.size(0)
+        return ref_pixel_values.repeat_interleave(repeats, dim=0)
+    raise ValueError(
+        f"Reference batch size {ref_pixel_values.size(0)} cannot match target batch size {target_batch_size}."
+    )
+
+def normalize_ref_video_tensor(ref_values, target_frames, target_batch_size, dtype):
+    if ref_values.ndim != 5:
+        raise ValueError(f"Expected ref_values to have 5 dims, got {tuple(ref_values.shape)}.")
+    if ref_values.shape[-1] in (1, 3):
+        ref_values = ref_values.permute(0, 4, 1, 2, 3).contiguous()
+    ref_values = align_video_frames(ref_values, target_frames)
+    ref_values = match_ref_batch(ref_values, target_batch_size)
+    return ref_values.to(dtype)
+
+def flatten_lilora_weight(weight):
+    if weight.dim() == 3:
+        return weight.view(weight.size(0), -1)
+    if weight.dim() == 2:
+        return weight.view(-1) if weight.size(0) == 1 else weight.view(weight.size(0), -1)
+    if weight.dim() == 1:
+        return weight.view(-1)
+    raise ValueError(f"Unsupported LiLoRA weight shape: {tuple(weight.shape)}")
+
+def apply_hypernetwork_weights(network, pred_weights_list):
+    actual_network = network.module if hasattr(network, "module") else network
+    for weight, lora_layer in zip(pred_weights_list, actual_network.unet_loras):
+        lora_layer.update_weight(flatten_lilora_weight(weight))
+
+def save_hypernetwork_weights(path, hypernetwork, dtype):
+    from safetensors.torch import save_file
+
+    state_dict = {}
+    for key, value in hypernetwork.state_dict().items():
+        tensor = value.detach().clone().cpu()
+        if dtype is not None and torch.is_floating_point(tensor):
+            tensor = tensor.to(dtype)
+        state_dict[key] = tensor
+    save_file(state_dict, path, {})
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
 check_min_version("0.18.0.dev0")
@@ -599,6 +659,41 @@ def parse_args():
         help="Whether to train the text encoder. If set, the text encoder should be float32 precision.",
     )
     parser.add_argument(
+        "--enable_video2lora",
+        action="store_true",
+        help="Enable Video2LoRA HyperNetwork training from reference videos.",
+    )
+    parser.add_argument(
+        "--down_dim",
+        type=int,
+        default=200,
+        help="The down dimension of LiLoRA auxiliary matrices.",
+    )
+    parser.add_argument(
+        "--up_dim",
+        type=int,
+        default=100,
+        help="The up dimension of LiLoRA auxiliary matrices.",
+    )
+    parser.add_argument(
+        "--hypernetwork_lr",
+        type=float,
+        default=None,
+        help="Learning rate for Video2LoRA HyperNetwork. Defaults to --learning_rate.",
+    )
+    parser.add_argument(
+        "--hypernetwork_decoder_blocks",
+        type=int,
+        default=4,
+        help="Number of transformer decoder blocks in the Video2LoRA HyperNetwork.",
+    )
+    parser.add_argument(
+        "--hypernetwork_sample_iters",
+        type=int,
+        default=4,
+        help="Number of iterative weight decoding passes in the Video2LoRA HyperNetwork.",
+    )
+    parser.add_argument(
         "--snr_loss", action="store_true", help="Whether or not to use snr_loss."
     )
     parser.add_argument(
@@ -844,6 +939,9 @@ def main():
         fsdp_stage = 0
         print("DeepSpeed is not enabled.")
 
+    if args.enable_video2lora and fsdp_stage != 0:
+        raise NotImplementedError("Video2LoRA HyperNetwork training is not wired for FSDP yet; use DeepSpeed or single-node accelerate.")
+
     if accelerator.is_main_process:
         writer = SummaryWriter(log_dir=logging_dir)
 
@@ -872,7 +970,9 @@ def main():
         rng = None
         torch_rng = None
     index_rng = np.random.default_rng(np.random.PCG64(43))
-    print(f"Init rng with seed {args.seed + accelerator.process_index}. Process_index is {accelerator.process_index}")
+    seed_for_log = args.seed + accelerator.process_index if args.seed is not None else None
+    sampler_seed = args.seed if args.seed is not None else 0
+    print(f"Init rng with seed {seed_for_log}. Process_index is {accelerator.process_index}")
 
     # Handle the repository creation
     if accelerator.is_main_process:
@@ -962,8 +1062,26 @@ def main():
         transformer3d,
         neuron_dropout=None,
         skip_name=args.lora_skip_name,
+        down_dim=args.down_dim,
+        up_dim=args.up_dim,
+        is_train=args.enable_video2lora,
     )
     network.apply_to(text_encoder, transformer3d, args.train_text_encoder and not args.training_with_video_token_length, True)
+
+    hypernetwork = None
+    if args.enable_video2lora:
+        actual_network = network.module if hasattr(network, "module") else network
+        lora_weight_dim = (args.down_dim + args.up_dim) * args.rank
+        hypernetwork = VideoHyperDream(
+            video_feat_dim=get_vae_latent_channels(vae),
+            weight_num=len(actual_network.unet_loras),
+            weight_dim=lora_weight_dim,
+            decoder_blocks=args.hypernetwork_decoder_blocks,
+            sample_iters=args.hypernetwork_sample_iters,
+        ).to(weight_dtype)
+        hypernetwork.set_lilora(actual_network.unet_loras)
+        hypernetwork.set_device(accelerator.device)
+        hypernetwork.train()
 
     if args.transformer_path is not None:
         print(f"From checkpoint: {args.transformer_path}")
@@ -1035,8 +1153,18 @@ def main():
         else:
             def save_model_hook(models, weights, output_dir):
                 if accelerator.is_main_process:
+                    network_ = None
+                    hypernetwork_ = None
+                    for model in models:
+                        unwrapped_model = accelerator.unwrap_model(model)
+                        if isinstance(unwrapped_model, LoRANetwork):
+                            network_ = unwrapped_model
+                        elif isinstance(unwrapped_model, VideoHyperDream):
+                            hypernetwork_ = unwrapped_model
+
                     safetensor_save_path = os.path.join(output_dir, f"lora_diffusion_pytorch_model.safetensors")
-                    save_model(safetensor_save_path, accelerator.unwrap_model(models[-1]))
+                    if network_ is not None:
+                        save_model(safetensor_save_path, network_, hypernetwork_)
                     if not args.use_deepspeed:
                         for _ in range(len(weights)):
                             weights.pop()
@@ -1045,6 +1173,28 @@ def main():
                         pickle.dump([batch_sampler.sampler._pos_start, first_epoch], file)
 
             def load_model_hook(models, input_dir):
+                network_ = None
+                hypernetwork_ = None
+                while len(models) > 0:
+                    model = accelerator.unwrap_model(models.pop())
+                    if isinstance(model, LoRANetwork):
+                        network_ = model
+                    elif isinstance(model, VideoHyperDream):
+                        hypernetwork_ = model
+
+                if network_ is not None:
+                    lora_path = os.path.join(input_dir, "lora_diffusion_pytorch_model.safetensors")
+                    if os.path.exists(lora_path):
+                        from safetensors.torch import load_file
+                        state_dict = load_file(lora_path)
+                        network_.load_state_dict(state_dict, strict=False)
+
+                if hypernetwork_ is not None:
+                    hyper_path = os.path.join(input_dir, "hypernetwork.safetensors")
+                    if os.path.exists(hyper_path):
+                        from safetensors.torch import load_file
+                        hypernetwork_.load_state_dict(load_file(hyper_path))
+
                 pkl_path = os.path.join(input_dir, "sampler_pos_start.pkl")
                 if os.path.exists(pkl_path):
                     with open(pkl_path, 'rb') as file:
@@ -1093,10 +1243,16 @@ def main():
     logging.info("Add network parameters")
     trainable_params = list(filter(lambda p: p.requires_grad, network.parameters()))
     trainable_params_optim = network.prepare_optimizer_params(args.learning_rate / 2, args.learning_rate, args.learning_rate)
+    params_to_optimize = trainable_params_optim
+    if hypernetwork is not None:
+        hypernetwork_lr = args.hypernetwork_lr if args.hypernetwork_lr is not None else args.learning_rate
+        hypernetwork_params = list(filter(lambda p: p.requires_grad, hypernetwork.parameters()))
+        params_to_optimize = params_to_optimize + [{"params": hypernetwork_params, "lr": hypernetwork_lr}]
+        trainable_params = trainable_params + hypernetwork_params
 
     if args.use_came:
         optimizer = optimizer_cls(
-            trainable_params_optim,
+            params_to_optimize,
             lr=args.learning_rate,
             # weight_decay=args.adam_weight_decay,
             betas=(0.9, 0.999, 0.9999), 
@@ -1104,7 +1260,7 @@ def main():
         )
     else:
         optimizer = optimizer_cls(
-            trainable_params_optim,
+            params_to_optimize,
             lr=args.learning_rate,
             betas=(args.adam_beta1, args.adam_beta2),
             weight_decay=args.adam_weight_decay,
@@ -1133,7 +1289,7 @@ def main():
     
     if args.enable_bucket:
         aspect_ratio_sample_size = {key : [x / 512 * args.video_sample_size for x in ASPECT_RATIO_512[key]] for key in ASPECT_RATIO_512.keys()}
-        batch_sampler_generator = torch.Generator().manual_seed(args.seed)
+        batch_sampler_generator = torch.Generator().manual_seed(sampler_seed)
         batch_sampler = AspectRatioBatchImageVideoSampler(
             sampler=RandomSampler(train_dataset, generator=batch_sampler_generator), dataset=train_dataset.dataset, 
             batch_size=args.train_batch_size, train_folder = args.train_data_dir, drop_last=True,
@@ -1165,6 +1321,8 @@ def main():
             new_examples["target_token_length"] = target_token_length
             new_examples["pixel_values"] = []
             new_examples["text"]         = []
+            if args.enable_video2lora:
+                new_examples["ref_values"] = []
             # Used in Inpaint mode 
             if args.train_mode != "normal":
                 new_examples["mask_pixel_values"] = []
@@ -1285,8 +1443,23 @@ def main():
                         transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True),
                     ])
 
-                new_examples["pixel_values"].append(transform(pixel_values)[:batch_video_length])
+                transformed_pixel_values = transform(pixel_values)[:batch_video_length]
+                new_examples["pixel_values"].append(transformed_pixel_values)
                 new_examples["text"].append(example["text"])
+
+                if args.enable_video2lora:
+                    ref_values = example.get("ref_values", example["pixel_values"])
+                    if isinstance(ref_values, torch.Tensor):
+                        ref_pixel_values = ref_values
+                        if ref_pixel_values.ndim == 4 and ref_pixel_values.shape[-1] in (1, 3):
+                            ref_pixel_values = ref_pixel_values.permute(0, 3, 1, 2).contiguous()
+                    else:
+                        ref_pixel_values = torch.from_numpy(ref_values).permute(0, 3, 1, 2).contiguous()
+                    if ref_pixel_values.max() > 1:
+                        ref_pixel_values = ref_pixel_values / 255.
+                    ref_pixel_values = transform(ref_pixel_values)
+                    ref_pixel_values = align_video_frames(ref_pixel_values.unsqueeze(0), batch_video_length).squeeze(0)
+                    new_examples["ref_values"].append(ref_pixel_values)
 
                 if args.train_mode != "normal":
                     mask = get_random_mask(new_examples["pixel_values"][-1].size(), image_start_only=True)
@@ -1302,6 +1475,8 @@ def main():
 
             # Limit the number of frames to the same
             new_examples["pixel_values"] = torch.stack([example for example in new_examples["pixel_values"]])
+            if args.enable_video2lora:
+                new_examples["ref_values"] = torch.stack([example for example in new_examples["ref_values"]])
             if args.train_mode != "normal":
                 new_examples["mask_pixel_values"] = torch.stack([example for example in new_examples["mask_pixel_values"]])
                 new_examples["mask"] = torch.stack([example for example in new_examples["mask"]])
@@ -1335,7 +1510,7 @@ def main():
         )
     else:
         # DataLoaders creation:
-        batch_sampler_generator = torch.Generator().manual_seed(args.seed)
+        batch_sampler_generator = torch.Generator().manual_seed(sampler_seed)
         batch_sampler = ImageVideoSampler(RandomSampler(train_dataset, generator=batch_sampler_generator), train_dataset, args.train_batch_size)
         train_dataloader = torch.utils.data.DataLoader(
             train_dataset,
@@ -1366,9 +1541,14 @@ def main():
             transformer3d, optimizer, train_dataloader, lr_scheduler
         )
     else:
-        network, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-            network, optimizer, train_dataloader, lr_scheduler
-        )
+        if hypernetwork is not None:
+            network, hypernetwork, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+                network, hypernetwork, optimizer, train_dataloader, lr_scheduler
+            )
+        else:
+            network, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+                network, optimizer, train_dataloader, lr_scheduler
+            )
 
     if zero_stage == 3:
         from functools import partial
@@ -1385,6 +1565,9 @@ def main():
     # Move text_encode and vae to gpu and cast to weight_dtype
     vae.to(accelerator.device if not args.low_vram else "cpu", dtype=weight_dtype)
     transformer3d.to(accelerator.device, dtype=weight_dtype)
+    if hypernetwork is not None:
+        hypernetwork.to(accelerator.device, dtype=weight_dtype)
+        accelerator.unwrap_model(hypernetwork).set_device(accelerator.device)
     if not args.enable_text_encoder_in_dataloader:
         text_encoder.to(accelerator.device if not args.low_vram else "cpu", dtype=weight_dtype)
 
@@ -1461,6 +1644,12 @@ def main():
                 m, u = accelerator.unwrap_model(network).load_state_dict(state_dict, strict=False)
                 print(f"missing keys: {len(m)}, unexpected keys: {len(u)}")
 
+                if hypernetwork is not None:
+                    hyper_path = os.path.join(checkpoint_folder_path, "hypernetwork.safetensors")
+                    if os.path.exists(hyper_path):
+                        accelerator.unwrap_model(hypernetwork).load_state_dict(load_file(hyper_path, device=str(accelerator.device)))
+                        accelerator.print(f"HyperNetwork weights loaded from {hyper_path}")
+
                 optimizer_file_pt = os.path.join(checkpoint_folder_path, "optimizer.pt")
                 optimizer_file_bin = os.path.join(checkpoint_folder_path, "optimizer.bin")
                 optimizer_file_to_load = None
@@ -1516,10 +1705,17 @@ def main():
         initial_global_step = 0
 
     # function for saving/removing
-    def save_model(ckpt_file, unwrapped_nw):
+    def save_model(ckpt_file, unwrapped_nw, unwrapped_hypernetwork=None):
         os.makedirs(args.output_dir, exist_ok=True)
         accelerator.print(f"\nsaving checkpoint: {ckpt_file}")
         unwrapped_nw.save_weights(ckpt_file, weight_dtype, None)
+        if unwrapped_hypernetwork is not None:
+            if os.path.basename(ckpt_file) == "lora_diffusion_pytorch_model.safetensors":
+                hyper_ckpt_file = os.path.join(os.path.dirname(ckpt_file), "hypernetwork.safetensors")
+            else:
+                hyper_ckpt_file = os.path.splitext(ckpt_file)[0] + ".hypernetwork.safetensors"
+            save_hypernetwork_weights(hyper_ckpt_file, unwrapped_hypernetwork, weight_dtype)
+            accelerator.print(f"saving hypernetwork checkpoint: {hyper_ckpt_file}")
 
     progress_bar = tqdm(
         range(0, args.max_train_steps),
@@ -1558,7 +1754,7 @@ def main():
 
     for epoch in range(first_epoch, args.num_train_epochs):
         train_loss = 0.0
-        batch_sampler.sampler.generator = torch.Generator().manual_seed(args.seed + epoch)
+        batch_sampler.sampler.generator = torch.Generator().manual_seed(sampler_seed + epoch)
         for step, batch in enumerate(train_dataloader):
             if epoch == first_epoch and step == 0:
                 pixel_values, texts = batch['pixel_values'].cpu(), batch['text']
@@ -1664,6 +1860,17 @@ def main():
                         mask_pixel_values = mask_pixel_values[:, :actual_video_length, :, :]
                         mask = mask[:, :actual_video_length, :, :]
 
+                ref_pixel_values = None
+                if hypernetwork is not None:
+                    if "ref_values" not in batch:
+                        raise ValueError("Video2LoRA requires `ref_values` in each batch. Check the dataset annotation and loader.")
+                    ref_pixel_values = normalize_ref_video_tensor(
+                        batch["ref_values"],
+                        target_frames=pixel_values.size(1),
+                        target_batch_size=pixel_values.size(0),
+                        dtype=weight_dtype,
+                    )
+
                 # Make the inpaint latents to be zeros.
                 if args.train_mode != "normal":
                     t2v_flag = [(_mask == 1).all() for _mask in mask]
@@ -1681,6 +1888,7 @@ def main():
                     if not args.enable_text_encoder_in_dataloader:
                         text_encoder.to("cpu")
 
+                ref_video_features = None
                 with torch.no_grad():
                     # This way is quicker when batch grows up
                     def _batch_encode_vae(pixel_values):
@@ -1699,6 +1907,9 @@ def main():
                             latents = _batch_encode_vae(pixel_values)
                     else:
                         latents = _batch_encode_vae(pixel_values)
+
+                    if ref_pixel_values is not None:
+                        ref_video_features = _batch_encode_vae(ref_pixel_values)
 
                     if args.train_mode != "normal":
                         mask = rearrange(mask, "b f c h w -> b c f h w")
@@ -1736,6 +1947,10 @@ def main():
                     torch.cuda.empty_cache()
                     if not args.enable_text_encoder_in_dataloader:
                         text_encoder.to(accelerator.device)
+
+                if hypernetwork is not None:
+                    _, pred_weights_list = hypernetwork(ref_video_features.to(accelerator.device))
+                    apply_hypernetwork_weights(network, pred_weights_list)
 
                 if args.enable_text_encoder_in_dataloader:
                     prompt_embeds = batch['encoder_hidden_states'].to(device=latents.device)
@@ -1898,7 +2113,11 @@ def main():
                         torch.cuda.ipc_collect()
                         if not args.save_state:
                             safetensor_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}.safetensors")
-                            save_model(safetensor_save_path, accelerator.unwrap_model(network))
+                            save_model(
+                                safetensor_save_path,
+                                accelerator.unwrap_model(network),
+                                accelerator.unwrap_model(hypernetwork) if hypernetwork is not None else None,
+                            )
                             logger.info(f"Saved safetensor to {safetensor_save_path}")
                         else:
                             accelerator_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
@@ -1949,7 +2168,11 @@ def main():
         torch.cuda.ipc_collect()
         if not args.save_state:
             safetensor_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}.safetensors")
-            save_model(safetensor_save_path, accelerator.unwrap_model(network))
+            save_model(
+                safetensor_save_path,
+                accelerator.unwrap_model(network),
+                accelerator.unwrap_model(hypernetwork) if hypernetwork is not None else None,
+            )
         else:
             accelerator_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
             accelerator.save_state(accelerator_save_path)

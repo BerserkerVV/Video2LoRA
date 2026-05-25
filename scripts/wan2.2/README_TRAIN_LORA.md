@@ -2,6 +2,22 @@
 
 We can choose whether to use deep speed in Wan, which can save a lot of video memory. 
 
+## Video2LoRA on Wan2.2
+
+Wan2.2 Video2LoRA training is enabled with `--enable_video2lora`. The dataset loader accepts both the standard VideoX-Fun format:
+
+```json
+{"file_path": "train/00000001.mp4", "text": "caption", "type": "video"}
+```
+
+and Video-As-Prompt-style annotations:
+
+```json
+{"video_path": "train/00000001.mp4", "video_caption": "caption", "class": "camera_motion"}
+```
+
+When `class` is present, the loader samples a different reference video from the same class for the HyperNetwork. A ready-to-edit 5B TI2V launch script is available at `scripts/wan2.2/train_video2lora_5b.sh`; set `MODEL_NAME`, `DATASET_NAME`, `DATASET_META_NAME`, and optionally `MAX_TRAIN_STEPS` before running it.
+
 Some parameters in the sh file can be confusing, and they are explained in this document:
 
 - `enable_bucket` is used to enable bucket training. When enabled, the model does not crop the images and videos at the center, but instead, it trains the entire images and videos after grouping them into buckets based on resolution.

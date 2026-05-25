@@ -65,7 +65,9 @@ class ImageVideoSampler(BatchSampler):
 
     def __iter__(self):
         for idx in self.sampler:
-            content_type = self.dataset.dataset[idx].get('type', 'image')
+            item = self.dataset.dataset[idx]
+            media_path = self.dataset._get_media_path(item)
+            content_type = self.dataset._get_data_type(item, media_path)
             self.bucket[content_type].append(idx)
 
             # yield a batch of indices in the same aspect ratio group
@@ -107,12 +109,12 @@ class ImageVideoDataset(Dataset):
         if video_repeat > 0:
             self.dataset = []
             for data in dataset:
-                if data.get('type', 'image') != 'video':
+                if self._get_data_type(data, self._get_media_path(data)) != 'video':
                     self.dataset.append(data)
                     
             for _ in range(video_repeat):
                 for data in dataset:
-                    if data.get('type', 'image') == 'video':
+                    if self._get_data_type(data, self._get_media_path(data)) == 'video':
                         self.dataset.append(data)
         else:
             self.dataset = dataset
@@ -151,16 +153,57 @@ class ImageVideoDataset(Dataset):
         ])
 
         self.larger_side_of_image_and_video = max(min(self.image_sample_size), min(self.video_sample_size))
-        # Reference video indices for each class
+        # Reference video indices for each semantic class. Video-As-Prompt
+        # annotations use video_path/video_caption/class, while VideoX-Fun
+        # style annotations use file_path/text/type. Keep both formats valid.
         self.class_to_indices = {}
         for i, item in enumerate(self.dataset):
-            cls = item["class"]
+            cls = self._get_class(item)
             if cls not in self.class_to_indices:
                 self.class_to_indices[cls] = []
             self.class_to_indices[cls].append(i)
 
+    @staticmethod
+    def _get_class(data_info):
+        return (
+            data_info.get("class")
+            or data_info.get("label")
+            or data_info.get("category")
+            or "__default__"
+        )
+
+    @staticmethod
+    def _get_text(data_info):
+        return (
+            data_info.get("video_caption")
+            or data_info.get("text")
+            or data_info.get("caption")
+            or data_info.get("prompt")
+            or ""
+        )
+
+    @staticmethod
+    def _get_media_path(data_info):
+        return (
+            data_info.get("video_path")
+            or data_info.get("file_path")
+            or data_info.get("path")
+            or data_info.get("image_path")
+        )
+
+    @staticmethod
+    def _get_data_type(data_info, media_path):
+        data_type = data_info.get("type") or data_info.get("data_type")
+        if data_type is not None:
+            return data_type
+
+        ext = os.path.splitext(media_path or "")[-1].lower()
+        if ext in [".jpg", ".jpeg", ".png", ".webp", ".bmp"]:
+            return "image"
+        return "video"
+
     def sample_ref_index(self, current_idx):
-        cls = self.dataset[current_idx]["class"]
+        cls = self._get_class(self.dataset[current_idx])
         candidates = [i for i in self.class_to_indices[cls] if i != current_idx]
         if len(candidates) == 0:
             return current_idx
@@ -169,17 +212,32 @@ class ImageVideoDataset(Dataset):
     def get_batch(self, idx, for_ref=False):
         data_info = self.dataset[idx % len(self.dataset)]
 
-        video_id = data_info["video_path"]
-        text     = data_info["video_caption"]
+        video_id = self._get_media_path(data_info)
+        if video_id is None:
+            raise ValueError(f"Annotation item is missing a media path: {data_info}")
+        text = self._get_text(data_info)
+        data_type = self._get_data_type(data_info, video_id)
 
         if self.data_root is not None:
             video_dir = os.path.join(self.data_root, video_id)
         else:
             video_dir = video_id
 
+        if data_type == "image":
+            image = Image.open(video_dir).convert("RGB")
+            pixel_values = np.array(image)[None, ...]
+            if not self.enable_bucket:
+                pixel_values = self.image_transforms(image).unsqueeze(0)
+            if random.random() < self.text_drop_ratio and not for_ref:
+                text = ''
+            return pixel_values, text, "image", video_dir
+
         with VideoReader_contextmanager(video_dir, num_threads=2) as video_reader:
             if for_ref:
-                batch_index = np.arange(len(video_reader))
+                ref_frames = min(self.video_sample_n_frames, len(video_reader))
+                if ref_frames <= 0:
+                    raise ValueError(f"No frames in reference video: {video_dir}")
+                batch_index = np.linspace(0, len(video_reader) - 1, ref_frames, dtype=int)
             else:
                 min_sample_n_frames = min(
                     self.video_sample_n_frames, 
@@ -217,7 +275,7 @@ class ImageVideoDataset(Dataset):
         if random.random() < self.text_drop_ratio:
             text = ''
 
-        return pixel_values, text, 'video', video_dir
+        return pixel_values, text, data_type, video_dir
 
     def __len__(self):
         return self.length
