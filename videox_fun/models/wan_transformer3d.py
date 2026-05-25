@@ -1121,6 +1121,52 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         model_file = os.path.join(pretrained_model_path, WEIGHTS_NAME)
         model_file_safetensors = model_file.replace(".bin", ".safetensors")
 
+        def convert_diffusers_wan_state_dict(state_dict):
+            if not any(
+                key.startswith("condition_embedder.") or
+                ".attn1." in key or
+                ".attn2." in key or
+                key.startswith("proj_out.")
+                for key in state_dict
+            ):
+                return state_dict
+
+            converted_state_dict = {}
+            for key, value in state_dict.items():
+                new_key = key
+                if new_key.startswith("condition_embedder.text_embedder.linear_1."):
+                    new_key = new_key.replace("condition_embedder.text_embedder.linear_1.", "text_embedding.0.")
+                elif new_key.startswith("condition_embedder.text_embedder.linear_2."):
+                    new_key = new_key.replace("condition_embedder.text_embedder.linear_2.", "text_embedding.2.")
+                elif new_key.startswith("condition_embedder.time_embedder.linear_1."):
+                    new_key = new_key.replace("condition_embedder.time_embedder.linear_1.", "time_embedding.0.")
+                elif new_key.startswith("condition_embedder.time_embedder.linear_2."):
+                    new_key = new_key.replace("condition_embedder.time_embedder.linear_2.", "time_embedding.2.")
+                elif new_key.startswith("condition_embedder.time_proj."):
+                    new_key = new_key.replace("condition_embedder.time_proj.", "time_projection.1.")
+                elif new_key.startswith("proj_out."):
+                    new_key = new_key.replace("proj_out.", "head.head.")
+                elif new_key == "scale_shift_table":
+                    new_key = "head.modulation"
+
+                if new_key.startswith("blocks."):
+                    new_key = new_key.replace(".attn1.", ".self_attn.")
+                    new_key = new_key.replace(".attn2.", ".cross_attn.")
+                    new_key = new_key.replace(".to_q.", ".q.")
+                    new_key = new_key.replace(".to_k.", ".k.")
+                    new_key = new_key.replace(".to_v.", ".v.")
+                    new_key = new_key.replace(".to_out.0.", ".o.")
+                    new_key = new_key.replace(".ffn.net.0.proj.", ".ffn.0.")
+                    new_key = new_key.replace(".ffn.net.2.", ".ffn.2.")
+                    new_key = new_key.replace(".norm2.", ".norm3.")
+                    if new_key.endswith(".scale_shift_table"):
+                        new_key = new_key.replace(".scale_shift_table", ".modulation")
+
+                converted_state_dict[new_key] = value
+
+            print("Converted Diffusers Wan transformer checkpoint keys.")
+            return converted_state_dict
+
         if "dict_mapping" in transformer_additional_kwargs.keys():
             for key in transformer_additional_kwargs["dict_mapping"]:
                 transformer_additional_kwargs[transformer_additional_kwargs["dict_mapping"][key]] = config[key]
@@ -1159,6 +1205,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                         _state_dict = load_file(_model_file_safetensors)
                         for key in _state_dict:
                             state_dict[key] = _state_dict[key]
+                state_dict = convert_diffusers_wan_state_dict(state_dict)
 
                 if model.state_dict()['patch_embedding.weight'].size() != state_dict['patch_embedding.weight'].size():
                     model.state_dict()['patch_embedding.weight'][:, :state_dict['patch_embedding.weight'].size()[1], :, :] = state_dict['patch_embedding.weight'][:, :model.state_dict()['patch_embedding.weight'].size()[1], :, :]
@@ -1265,6 +1312,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                 _state_dict = load_file(_model_file_safetensors)
                 for key in _state_dict:
                     state_dict[key] = _state_dict[key]
+        state_dict = convert_diffusers_wan_state_dict(state_dict)
         
         if model.state_dict()['patch_embedding.weight'].size() != state_dict['patch_embedding.weight'].size():
             model.state_dict()['patch_embedding.weight'][:, :state_dict['patch_embedding.weight'].size()[1], :, :] = state_dict['patch_embedding.weight'][:, :model.state_dict()['patch_embedding.weight'].size()[1], :, :]

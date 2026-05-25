@@ -52,9 +52,8 @@ class WeightDecoder(nn.Module):
 
         # calc heads for mem-eff or flash_attn
         heads = 1
-        while weight_dim % heads == 0 and weight_dim // heads > 64:
+        while weight_dim % (heads * 2) == 0 and weight_dim // (heads * 2) >= 64:
             heads *= 2
-        heads //= 2
 
         self.pos_emb_proj = nn.Linear(weight_dim, weight_dim, bias=False)
         self.decoder_model = nn.ModuleList(
