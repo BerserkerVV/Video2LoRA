@@ -16,7 +16,7 @@ and Video-As-Prompt-style annotations:
 {"video_path": "train/00000001.mp4", "video_caption": "caption", "class": "camera_motion"}
 ```
 
-When `class` is present, the loader samples a different reference video from the same class for the HyperNetwork. A ready-to-edit 5B TI2V launch script is available at `scripts/wan2.2/train_video2lora_5b.sh`; set `MODEL_NAME`, `DATASET_NAME`, `DATASET_META_NAME`, and optionally `MAX_TRAIN_STEPS` before running it.
+When `class` is present, the loader samples a different reference video from the same class for the HyperNetwork. A ready-to-edit 5B TI2V launch script is available at `scripts/wan2.2/train_video2lora_5b.sh`; set `MODEL_NAME`, `DATASET_NAME`, `DATASET_META_NAME`, and optionally `MAX_TRAIN_STEPS` before running it. The script defaults to `config/wan2.2/wan_diffusers_5b.yaml`, which is for Diffusers-format `Wan2.2-TI2V-5B-Diffusers` checkpoints; use `config/wan2.2/wan_civitai_5b.yaml` only for the original single-file/Civitai layout.
 
 Some parameters in the sh file can be confusing, and they are explained in this document:
 

@@ -159,7 +159,96 @@ def get_vae_latent_channels(vae):
     config = getattr(vae, "config", None)
     if config is not None and hasattr(config, "latent_channels"):
         return config.latent_channels
+    if config is not None and "latent_channels" in config:
+        return config["latent_channels"]
+    if config is not None and hasattr(config, "z_dim"):
+        return config.z_dim
+    if config is not None and "z_dim" in config:
+        return config["z_dim"]
     return getattr(vae, "latent_channels", 16)
+
+def get_vae_temporal_compression_ratio(vae):
+    config = getattr(vae, "config", None)
+    if config is not None and hasattr(config, "temporal_compression_ratio"):
+        return config.temporal_compression_ratio
+    if config is not None and "temporal_compression_ratio" in config:
+        return config["temporal_compression_ratio"]
+    if config is not None and hasattr(config, "scale_factor_temporal"):
+        return config.scale_factor_temporal
+    if config is not None and "scale_factor_temporal" in config:
+        return config["scale_factor_temporal"]
+    return 4
+
+def get_vae_spatial_compression_ratio(vae):
+    config = getattr(vae, "config", None)
+    if config is not None and hasattr(config, "spatial_compression_ratio"):
+        return config.spatial_compression_ratio
+    if config is not None and "spatial_compression_ratio" in config:
+        return config["spatial_compression_ratio"]
+    if config is not None and hasattr(config, "scale_factor_spatial"):
+        return config.scale_factor_spatial
+    if config is not None and "scale_factor_spatial" in config:
+        return config["scale_factor_spatial"]
+    return 8
+
+def normalize_vae_runtime_attrs(vae):
+    latent_channels = get_vae_latent_channels(vae)
+    vae.latent_channels = latent_channels
+
+    config = getattr(vae, "config", None)
+    if config is not None:
+        try:
+            config.latent_channels = latent_channels
+            config.temporal_compression_ratio = get_vae_temporal_compression_ratio(vae)
+            config.spatial_compression_ratio = get_vae_spatial_compression_ratio(vae)
+        except Exception:
+            pass
+    return vae
+
+def is_diffusers_wan_config(config):
+    return config.get("format", "civitai") == "diffusers"
+
+def load_wan_text_encoder(config, pretrained_model_name_or_path, weight_dtype):
+    text_encoder_path = os.path.join(
+        pretrained_model_name_or_path,
+        config['text_encoder_kwargs'].get('text_encoder_subpath', 'text_encoder'),
+    )
+    if is_diffusers_wan_config(config):
+        from transformers import UMT5EncoderModel
+
+        return UMT5EncoderModel.from_pretrained(
+            text_encoder_path,
+            torch_dtype=weight_dtype,
+            low_cpu_mem_usage=True,
+        )
+
+    return WanT5EncoderModel.from_pretrained(
+        text_encoder_path,
+        additional_kwargs=OmegaConf.to_container(config['text_encoder_kwargs']),
+        low_cpu_mem_usage=True,
+        torch_dtype=weight_dtype,
+    )
+
+def load_wan_vae(config, pretrained_model_name_or_path):
+    vae_path = os.path.join(
+        pretrained_model_name_or_path,
+        config['vae_kwargs'].get('vae_subpath', 'vae'),
+    )
+    if is_diffusers_wan_config(config):
+        from diffusers import AutoencoderKLWan as DiffusersAutoencoderKLWan
+
+        vae = DiffusersAutoencoderKLWan.from_pretrained(vae_path)
+        return normalize_vae_runtime_attrs(vae)
+
+    chosen_autoencoder = {
+        "AutoencoderKLWan": AutoencoderKLWan,
+        "AutoencoderKLWan3_8": AutoencoderKLWan3_8
+    }[config['vae_kwargs'].get('vae_type', 'AutoencoderKLWan')]
+    vae = chosen_autoencoder.from_pretrained(
+        vae_path,
+        additional_kwargs=OmegaConf.to_container(config['vae_kwargs']),
+    )
+    return normalize_vae_runtime_attrs(vae)
 
 def align_video_frames(video, frame_count):
     if video.size(1) >= frame_count:
@@ -300,7 +389,8 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, config,
             with torch.no_grad():
                 if args.train_mode != "normal":
                     with torch.autocast("cuda", dtype=weight_dtype):
-                        video_length = int((args.video_sample_n_frames - 1) // vae.config.temporal_compression_ratio * vae.config.temporal_compression_ratio) + 1 if args.video_sample_n_frames != 1 else 1
+                        temporal_compression_ratio = get_vae_temporal_compression_ratio(vae)
+                        video_length = int((args.video_sample_n_frames - 1) // temporal_compression_ratio * temporal_compression_ratio) + 1 if args.video_sample_n_frames != 1 else 1
                         input_video, input_video_mask, _ = get_image_to_video_latent(None, None, video_length=video_length, sample_size=[args.video_sample_size, args.video_sample_size])
                         sample = pipeline(
                             args.validation_prompts[i],
@@ -1020,22 +1110,10 @@ def main():
     # across multiple gpus and only UNet2DConditionModel will get ZeRO sharded.
     with ContextManagers(deepspeed_zero_init_disabled_context_manager()):
         # Get Text encoder
-        text_encoder = WanT5EncoderModel.from_pretrained(
-            os.path.join(args.pretrained_model_name_or_path, config['text_encoder_kwargs'].get('text_encoder_subpath', 'text_encoder')),
-            additional_kwargs=OmegaConf.to_container(config['text_encoder_kwargs']),
-            low_cpu_mem_usage=True,
-            torch_dtype=weight_dtype,
-        )
+        text_encoder = load_wan_text_encoder(config, args.pretrained_model_name_or_path, weight_dtype)
         text_encoder = text_encoder.eval()
         # Get Vae
-        Chosen_AutoencoderKL = {
-            "AutoencoderKLWan": AutoencoderKLWan,
-            "AutoencoderKLWan3_8": AutoencoderKLWan3_8
-        }[config['vae_kwargs'].get('vae_type', 'AutoencoderKLWan')]
-        vae = Chosen_AutoencoderKL.from_pretrained(
-            os.path.join(args.pretrained_model_name_or_path, config['vae_kwargs'].get('vae_subpath', 'vae')),
-            additional_kwargs=OmegaConf.to_container(config['vae_kwargs']),
-        )
+        vae = load_wan_vae(config, args.pretrained_model_name_or_path)
         vae.eval()
             
     # Get Transformer
@@ -1268,8 +1346,8 @@ def main():
         )
 
     # Get the training dataset
-    sample_n_frames_bucket_interval = vae.config.temporal_compression_ratio
-    spatial_compression_ratio = vae.config.spatial_compression_ratio
+    sample_n_frames_bucket_interval = get_vae_temporal_compression_ratio(vae)
+    spatial_compression_ratio = get_vae_spatial_compression_ratio(vae)
     
     if args.fix_sample_size is not None and args.enable_bucket:
         args.video_sample_size = max(max(args.fix_sample_size), args.video_sample_size)
@@ -2014,7 +2092,7 @@ def main():
                 # Add noise
                 target = noise - latents
                 
-                target_shape = (vae.latent_channels, num_frames, width, height)
+                target_shape = (get_vae_latent_channels(vae), num_frames, width, height)
                 seq_len = math.ceil(
                     (target_shape[2] * target_shape[3]) /
                     (accelerator.unwrap_model(transformer3d).config.patch_size[1] * accelerator.unwrap_model(transformer3d).config.patch_size[2]) *

@@ -10,7 +10,7 @@ export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
 
 accelerate launch --mixed_precision="bf16" scripts/wan2.2/train_lora.py \
   --enable_video2lora \
-  --config_path="config/wan2.2/wan_civitai_5b.yaml" \
+  --config_path="config/wan2.2/wan_diffusers_5b.yaml" \
   --pretrained_model_name_or_path="$MODEL_NAME" \
   --train_data_dir="$DATASET_NAME" \
   --train_data_meta="$DATASET_META_NAME" \
